@@ -2,4 +2,4 @@
 
 !# Just the Born_2_be_root :)
 
-Documentacion - https://docs.google.com/document/d/1PI9UApHf5t10Pq4-_BT181lG21Q4vMI9UJ_wT1Cj6Cg/edit?usp=sharing
+Documentacion - https://drive.google.com/drive/folders/1W3xtPNuVMlD9KfL1pCW4qMHRBYVVNFG8?usp=share_link
