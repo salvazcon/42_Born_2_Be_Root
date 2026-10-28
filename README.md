@@ -4,53 +4,57 @@
 
 Documentacion - https://drive.google.com/drive/folders/1W3xtPNuVMlD9KfL1pCW4qMHRBYVVNFG8?usp=share_link
 
-"""
-Theme.py
+    new_colors = {}
 
-Light/dark mode for the whole GUI.
+    def new_color(color, option, wclass):
+        key = (color, option, wclass)
+        if key not in new_colors:
+            new_colors[key] = _role_color(color, option, wclass)
+        return new_colors[key]
 
-- THEME holds the colors of the active mode. Widgets created with explicit colors must take them from here
-  (THEME.panel, THEME.field...) instead of fixed values like "white", so new widgets follow the active mode.
-- set_dark_mode(root, dark) switches mode: recolors every existing tk widget (mapping each color of the old
-  palette to the same role in the new one), recolors ttk widgets and updates the defaults for new widgets.
-- Both modes use the same ttk theme ("clam"), the same rounded button and the same paddings: switching mode only
-  changes colors, so no widget or window changes size.
+    def _role_color(color, option, wclass):
+        roles = roles_by_rgb.get(rgb(color))
+        if not roles:
+            return None  # a color outside the palette (e.g. Running/Stopped labels): keep it
+        if option in _FG_OPTIONS:
+            roles = [r for r in roles if r in _FG_ROLES]
+            prefer = ("field_fg",) if wclass in _FIELD_CLASSES else ("menu_fg",) if wclass == "Menu" else ("fg",)
+        else:
+            roles = [r for r in roles if r not in _FG_ROLES]
+            if option == "selectbackground":
+                prefer = ("select",)
+            elif wclass in _FIELD_CLASSES:
+                prefer = ("field", "panel")
+            elif wclass == "Menu":
+                prefer = ("menu_bg",)
+            else:
+                prefer = ("bg", "panel")
+        if not roles:
+            return None
+        role = next((r for r in prefer if r in roles), roles[0])
+        return new[role]
 
-Call init_theme(root) once, right after creating the Tk root and before building the GUI.
-"""
-import tkinter as tk
-from tkinter import ttk
-
-# Colors of each mode, by role. Light values for bg/fg/field/menu are replaced by the system defaults in init_theme()
-LIGHT = dict(
-    bg="#f0f0f0",           # windows, frames, labels
-    fg="#000000",           # text
-    panel="#ffffff",        # white areas: message viewer, iteration cards, dropdown button
-    field="#ffffff",        # editable fields (tk Entry/Text)
-    field_fg="#000000",
-    disabled="#C9C9C9",     # disabled text area (data file editor)
-    error="#FFCCCC",        # invalid value
-    modified="#ffeab0",     # value edited but not applied yet
-    ghost="#E8E8E8",        # iteration being dragged
-    hover="#CCE8FF",        # dropdown button under the mouse
-    border="#A0A0A0",       # message cards border
-    select="#A3CBE3",       # selected text
-    highlight="yellow",     # search results in the data file editor
-    menu_bg="#f0f0f0",
-    menu_fg="#000000",
-)
-DARK = dict(
-    bg="#2d2d30",
-    fg="#e6e6e6",
-    panel="#252526",
-    field="#252526",
-    field_fg="#e6e6e6",
-    disabled="#3a3a3a",
-    error="#6e2a2a",
-    modified="#6b5a1e",
-    ghost="#444444",
-    hover="#2f4f6f",
-    border="#5a5a5a",
+    def recolor(widget):
+        if not isinstance(widget, ttk.Widget):  # ttk widgets follow the ttk style
+            wclass = widget.winfo_class()
+            try:
+                # tk.Misc.configure: read/write every option in one call each (and skip configure() overrides)
+                options = tk.Misc.configure(widget)
+                changes = {}
+                for option in _COLOR_OPTIONS:
+                    if option in options:
+                        current = str(options[option][-1])
+                        color = new_color(current, option, wclass)
+                        if color is not None and color != current:
+                            changes[option] = color
+                if changes:
+                    tk.Misc.configure(widget, **changes)
+            except tk.TclError:
+                pass
+            if wclass == "Text" and "highlight" in widget.tag_names():
+                widget.tag_configure("highlight", background=THEME.highlight)
+        for child in widget.winfo_children():
+            recolor(child)
     select="#3d6a8a",
     highlight="#8a7a00",
     menu_bg="#2d2d30",
