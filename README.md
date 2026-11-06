@@ -4,316 +4,356 @@
 
 Documentacion - https://drive.google.com/drive/folders/1W3xtPNuVMlD9KfL1pCW4qMHRBYVVNFG8?usp=share_link
 
-    _FLASH_MS = 150  # how long a button looks pressed when a sequence presses it
-
-    def __init__(self, master: tk.Misc):
-        super().__init__(master)
-        self.title("3ATI Display Buttons")
-        self.iconbitmap(PATH_TO_ICON)
-        self.resizable(False, False)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._buttons: dict[int, ttk.Button] = {}
-        self._sequence = None
-        self._player: SequencePlayer = None
-
-        frame = tk.LabelFrame(self, text="Display Buttons", font="Verdana 8 bold", bd=2)
-        frame.grid(row=0, column=0, padx=10, pady=10)
-
-        for button, (row, column) in self._LAYOUT.items():
-            btn = ttk.Button(frame, text="-", width=4, command=lambda b=button: self._press(b))
-            btn.grid(row=row, column=column, padx=10, pady=10)
-            self._buttons[button] = btn
-
-
-
-            row=1, column=1, rowspan=2, columnspan=5)
-
-        self._build_sequence_controls()
-        place_window(self, *ATI_WINDOW_POS)
-
-    def _build_sequence_controls(self):
-        frame = tk.LabelFrame(self, text="Sequence", font="Verdana 8 bold", bd=2)
-        frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
-        frame.columnconfigure(1, weight=1)
-
-        ttk.Button(frame, text="Load sequence", width=15, command=self._load_sequence).grid(
-            row=0, column=0, padx=5, pady=5)
-        self._seq_name = tk.Label(frame, text="No sequence loaded", anchor="w")
-        self._seq_name.grid(row=0, column=1, sticky="ew", padx=5)
-        self._run_button = ttk.Button(frame, text="Run", width=10, command=self._toggle_sequence, state="disabled")
-        self._run_button.grid(row=1, column=0, padx=5, pady=5)
-        self._seq_progress = tk.Label(frame, text="", anchor="w", fg=COLOR_GRAY)
-        self._seq_progress.grid(row=1, column=1, sticky="ew", padx=5)
-
-    def _press(self, button: int, flash: bool = False):
-        if flash:  # pressed by a sequence: show which one
-            btn = self._buttons[button]
-            btn.state(["pressed"])
-            self.after(self._FLASH_MS, lambda: btn.winfo_exists() and btn.state(["!pressed"]))
-        try:
-            datagram = send_display_button(button)
-            print(f"[INFO] 3ATI: display button {button} pressed ({datagram.hex(' ')})")
-        except OSError as e:
-            print(f"[ERROR] 3ATI: could not send display button {button}: {e}")
-
-    # --- Sequences ---
-    def _load_sequence(self):
-        if self._player and self._player.running:
-            self._player.stop()
-        path = filedialog.askopenfilename(
-            parent=self, title="Load 3ATI sequence", initialdir=SCENARIOS_DIR,
-            filetypes=[("3ATI sequence", "*.json *.yaml *.yml"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            self._sequence = load_sequence(path)
-        except SequenceError as e:
-            print(f"[ERROR] 3ATI sequence: {e}")
-            messagebox.showerror("3ATI sequence error", str(e), parent=self)
-            return
-        seq = self._sequence
-        self._player = SequencePlayer(self, seq, press=lambda b: self._press(b, flash=True),
-                                      on_step=self._on_sequence_step, on_finish=self._on_sequence_finish)
-        self._seq_name.config(text=seq.name)
-        self._seq_progress.config(text=f"{seq.presses} presses, {seq.duration_ms / 1000:.1f} s")
-        self._run_button.config(text="Run", state="normal")
-        print(f"[INFO] 3ATI sequence '{seq.name}' loaded: {seq.presses} presses, {seq.duration_ms / 1000:.1f} s")
-
-    def _toggle_sequence(self):
-        if self._player.running:
-            self._player.stop()
-        else:
-            self._run_button.config(text="Stop")
-            print(f"[INFO] 3ATI sequence '{self._sequence.name}' started")
-            self._player.start()
-
-    def _on_sequence_step(self, index: int, total: int, step):
-        action = f"button {step.button}" if step.button is not None else "pause"
-        self._seq_progress.config(text=f"Step {index}/{total}: {action}")
-
-    def _on_sequence_finish(self, completed: bool):
-        if not self.winfo_exists():
-            return
-        self._run_button.config(text="Run")
-        self._seq_progress.config(text="Finished" if completed else "Stopped")
-        print(f"[INFO] 3ATI sequence '{self._sequence.name}' {'finished' if completed else 'stopped'}")
-
-    def _on_close(self):
-        if self._player and self._player.running:
-            self._player.stop()
-        self._destroy_and_clear() if False else self.destroy()
-
-
 
 """
-ATISequence.py
+MessageViewer.py
 
-3ATI sequences: a template file (.json, or .yaml/.yml if PyYAML is installed) lists presses of the 3ATI display
-buttons and the time to wait between one press and the next. load_sequence() reads and validates it and
-SequencePlayer presses the buttons one after another without blocking the GUI (it uses Tk's after()).
+Message viewer of the Function windows ("Rx Messages") and of the sent messages window ("Sent Messages"):
+a list with one message per row and, below it, the detail of the selected message with some values translated
+(IPs, status, header timestamp).
 
-See scenarios/template_ati_sequence.json. This module has no widgets (the controls are in Popup.DisplayButtonsPopup).
+While it follows the messages (Pause not pressed) the newest message is selected and shown. Clicking a row (or
+pressing Pause) stops on that message; pressing Pause again goes back to the newest one.
 """
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
+import tkinter as tk
+from tkinter import ttk
 
 from Constants import *
-from Scenario import ScenarioError, _read_file
+from Messages import *
+from Widgets import MultiSelectDropdown
+from Theme import THEME
 
-_SEQUENCE_KEYS = {"name", "description", "default_delay_ms", "repeat", "steps"}
-_STEP_KEYS = {"button", "delay_ms", "times", "wait_ms"}
-DEFAULT_DELAY_MS = 1000
+_STATUS_NAMES = {status.value: name for name, status in STATUS_MAP.items()}
 
-
-class SequenceError(Exception):
-    """ The sequence file can't be read or has invalid content"""
-    pass
-
-
-@dataclass
-class Step:
-    """ One press of a display button (button=None: only a pause) and the time to wait before the next step"""
-    button: int | None
-    delay_ms: int
-
-
-@dataclass
-class Sequence:
-    name: str
-    description: str
-    path: Path
-    steps: list[Step] = field(default_factory=list)  # already expanded: "times" and "repeat" applied
-
-    @property
-    def presses(self) -> int:
-        return sum(1 for s in self.steps if s.button is not None)
-
-    @property
-    def duration_ms(self) -> int:
-        """ From the first press to the last one (the delay after the last step is not waited)"""
-        return sum(s.delay_ms for s in self.steps[:-1])
+# column id: (heading, width px, anchor)
+_COLUMNS = {
+    "time":     ("Time", 92, "w"),
+    "fid":      ("FID", 38, "e"),
+    "function": ("Function", 66, "w"),
+    "message":  ("Message", 178, "w"),
+    "seq":      ("Seq", 50, "e"),
+    "its":      ("Its", 32, "e"),
+}
+_REFRESH_MS = 100  # the detail and the selection are updated at most every _REFRESH_MS
 
 
-# ------------------------------------------------------------------------------------------------
-# Loading and validation
-# ------------------------------------------------------------------------------------------------
-def load_sequence(path) -> Sequence:
-    """ Reads and validates a 3ATI sequence template. Raises SequenceError listing every problem found"""
-    path = Path(path)
-    try:
-        data = _read_file(path)
-    except ScenarioError as e:
-        raise SequenceError(str(e))
-    if not isinstance(data, dict):
-        raise SequenceError(f"{path.name}: the file must contain an object with 'steps'")
-
-    errors = [f"unknown key '{k}' (valid: {', '.join(sorted(_SEQUENCE_KEYS))})"
-              for k in data if not k.startswith("_") and k not in _SEQUENCE_KEYS]
-    default_delay = _int(data, "default_delay_ms", DEFAULT_DELAY_MS, 0, errors, "default_delay_ms")
-    repeat = _int(data, "repeat", 1, 1, errors, "repeat")
-
-    raw_steps = data.get("steps")
-    if not isinstance(raw_steps, list) or not raw_steps:
-        errors.append("'steps' must be a non-empty list")
-        raw_steps = []
-
-    steps = []
-    for i, raw in enumerate(raw_steps, start=1):
-        steps += _parse_step(raw, f"steps[{i}]", default_delay, errors)
-
-    if errors:
-        raise SequenceError(f"{path.name} has {len(errors)} error(s):\n- " + "\n- ".join(errors))
-    return Sequence(name=str(data.get("name") or path.stem), description=str(data.get("description", "")),
-                    path=path, steps=steps * repeat)
-
-
-def _parse_step(raw, where: str, default_delay: int, errors: list[str]) -> list[Step]:
-    if not isinstance(raw, dict):
-        errors.append(f"{where}: must be an object, e.g. {{\"button\": 3, \"delay_ms\": 500}}")
-        return []
-    unknown = [k for k in raw if not k.startswith("_") and k not in _STEP_KEYS]
-    if unknown:
-        errors.append(f"{where}: unknown key(s) {', '.join(unknown)} (valid: {', '.join(sorted(_STEP_KEYS))})")
-
-    if "wait_ms" in raw:  # pause only
-        if "button" in raw:
-            errors.append(f"{where}: use 'button' (+ 'delay_ms') or 'wait_ms', not both")
-            return []
-        wait = _int(raw, "wait_ms", 0, 0, errors, f"{where}.wait_ms")
-        return [Step(button=None, delay_ms=wait)]
-
-    if "button" not in raw:
-        errors.append(f"{where}: missing 'button' (0-{ATI_N_BUTTONS - 1}) or 'wait_ms'")
-        return []
-    button = _int(raw, "button", 0, 0, errors, f"{where}.button")
-    if button >= ATI_N_BUTTONS:
-        errors.append(f"{where}.button: must be between 0 and {ATI_N_BUTTONS - 1} (got {button})")
-    delay = _int(raw, "delay_ms", default_delay, 0, errors, f"{where}.delay_ms")
-    times = _int(raw, "times", 1, 1, errors, f"{where}.times")
-    return [Step(button=button, delay_ms=delay) for _ in range(times)]
-
-
-def _int(data: dict, key: str, default: int, minimum: int, errors: list[str], where: str) -> int:
-    """ Integer value of data[key] (default if missing). Adds an error and returns the default if it is not valid"""
-    value = data.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        errors.append(f"{where}: must be an integer >= {minimum} (got {value!r})")
-        return default
-    return value
-
-
-# ------------------------------------------------------------------------------------------------
-# Playing a sequence
-# ------------------------------------------------------------------------------------------------
-class SequencePlayer:
-    """ Presses the buttons of a Sequence one after another without blocking the GUI.
-
-    Each step is scheduled from the start time of the sequence (not from the end of the previous step),
-    so the small delays of every press do not add up along the sequence.
+class MessageViewer(tk.Frame):
+    """ List + detail of a list of Messages, with filters by message and FID, Pause and Delete all.
 
     Args:
-        widget: any Tk widget, used for after()
-        sequence: the Sequence to play
-        press: callable(button) that presses one display button
-        on_step: callable(index, total, step) called after each step (index starts at 1)
-        on_finish: callable(completed) called at the end; completed is False if it was stopped
+        master: parent widget
+        msgs_list: messages already received/sent (shown when the viewer is created)
+        displayer_name: title of the viewer
+        fid_names: callable returning {fid: Function name} of the simulator's Functions (to name the FIDs)
+        bd: border of the viewer frame
     """
 
-    def __init__(self, widget, sequence: Sequence, press: callable, on_step: callable = None,
-                 on_finish: callable = None):
-        self._widget = widget
-        self._sequence = sequence
-        self._press = press
-        self._on_step = on_step
-        self._on_finish = on_finish
-        self._index = 0
-        self._next_time = 0.0
-        self._after_id = None
+    def __init__(self, master: tk.Misc, msgs_list: list[Message], displayer_name: str,
+                 fid_names: callable = None, bd: int = 2):
+        super().__init__(master)
+        self._displayer_name = displayer_name
+        self._fid_names = fid_names or (lambda: {})
+        self._history: list[Message] = []
+        self._shown: list[Message] = []  # messages that pass the filters, in the same order as the rows
+        self._msg_name_filter_selection = list(MSG_NAME_FILTER_VALUES)
+        self._fid_filter_selection: list[str] = []  # filled with the FIDs of the messages (_register_fid)
+        self._paused = False
+        self._detail_msg: Message = None  # message drawn in the detail
+        self._refresh_pending = False
 
-    @property
-    def running(self) -> bool:
-        return self._after_id is not None
+        base_grid = tk.LabelFrame(self, bd=bd, text=displayer_name, font="Verdana 8 bold")
+        base_grid.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        self._build_list(base_grid)
+        self._build_detail(base_grid)
+        self._build_controls(base_grid)
 
-    def start(self):
-        if self.running:
+        self._load_history(msgs_list)
+
+    # ------------------------------------------------------------------------------------------------
+    # Widgets
+    # ------------------------------------------------------------------------------------------------
+    def _build_list(self, master: tk.Misc):
+        frame = tk.Frame(master)
+        frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 5))
+        self._tree = ttk.Treeview(frame, columns=list(_COLUMNS), show="headings", height=9, selectmode="browse")
+        for column, (heading, width, anchor) in _COLUMNS.items():
+            self._tree.heading(column, text=heading, anchor=anchor)
+            self._tree.column(column, width=width, minwidth=width, anchor=anchor, stretch=False)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=scrollbar.set)
+        self._tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        # only the user's clicks and keys stop on a message (the selection made by the code must not)
+        self._tree.bind("<ButtonRelease-1>", self._on_user_select)
+        for key in ("Up", "Down", "Prior", "Next", "Home", "End"):
+            self._tree.bind(f"<KeyRelease-{key}>", self._on_user_select)
+
+    def _build_detail(self, master: tk.Misc):
+        frame = tk.Frame(master)
+        frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        self._detail = tk.Text(frame, height=13, width=68, wrap="none", font="Verdana 8", bd=1, relief="solid",
+                               bg=THEME.panel, padx=6, pady=4, cursor="arrow")
+        self._detail.tag_configure("title", font=("Verdana", 8, "bold"))
+        self._detail.tag_configure("section", font=("Verdana", 8, "bold"))
+        self._detail.tag_configure("name", font=("Verdana", 8, "bold"))
+        self._detail.tag_configure("raw", foreground=COLOR_GRAY)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self._detail.yview)
+        self._detail.configure(yscrollcommand=scrollbar.set)
+        self._detail.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+    def _build_controls(self, master: tk.Misc):
+        frame = tk.Frame(master)
+        frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(5, 10))
+
+        tk.Label(frame, text="Filter by Msg:").grid(row=0, column=0, sticky="w", padx=(0, 5))
+        MultiSelectDropdown(
+            frame, MSG_NAME_FILTER_VALUES, must_have_one=True, show_limit=0, width=1, start_checked=True,
+            on_select=lambda e: self._apply_filter(e, is_msg_name_filter=True)
+        ).grid(row=0, column=1, sticky="nsew", padx=(0, 15))
+
+        tk.Label(frame, text="Filter by FID:").grid(row=0, column=2, sticky="w", padx=(0, 5))
+        self._fid_filter = MultiSelectDropdown(
+            frame, [], must_have_one=True, show_limit=0, width=1, start_checked=True,
+            on_select=lambda e: self._apply_filter(e, is_msg_name_filter=False)
+        )
+        self._fid_filter.grid(row=0, column=3, sticky="nsew", padx=(0, 15))
+
+        self._button_pause = ttk.Button(frame, text="Pause", width=8, command=self._toggle_pause)
+        self._button_pause.grid(row=0, column=4, padx=2)
+        ttk.Button(frame, text="Delete all", width=10, command=self._delete_msgs).grid(row=0, column=5, padx=2)
+
+        # fixed width (the widest text): the window must not grow when the counter gains a digit
+        self._counter = tk.Label(frame, text="", anchor="e", width=len(f"{MAX_HISTORY} msgs"))
+        self._counter.grid(row=0, column=6, sticky="e", padx=(10, 0))
+        frame.columnconfigure(6, weight=1)
+
+    # ------------------------------------------------------------------------------------------------
+    # Public interface (same as the old MessageDisplayer)
+    # ------------------------------------------------------------------------------------------------
+    def process_data(self, msg: Message):
+        """ Adds a new message (received or sent)"""
+        self._register_fid(msg)
+        self._history.append(msg)
+        if len(self._history) > MAX_HISTORY:  # drop only the oldest message
+            self._drop_oldest()
+        if self._passes_filter(msg):
+            self._shown.append(msg)
+            self._insert_row(msg)
+        self._request_refresh()
+
+    def history(self) -> list[Message]:
+        return self._history
+
+    # ------------------------------------------------------------------------------------------------
+    # History and filters
+    # ------------------------------------------------------------------------------------------------
+    def _load_history(self, history):
+        self._history = list(history)
+        for msg in self._history:
+            self._register_fid(msg)
+        self._rebuild_rows()
+
+    def _drop_oldest(self):
+        oldest = self._history.pop(0)
+        if not self._shown or self._shown[0] is not oldest:
             return
-        self._index = 0
-        self._next_time = time.perf_counter()
-        self._after_id = self._widget.after(0, self._run_step)
+        self._shown.pop(0)
+        self._tree.delete(str(id(oldest)))
+        if self._paused and self._detail_msg is oldest:  # the message being viewed was dropped: resume
+            print(f"[INFO] {self._displayer_name}: paused message dropped (limit of {MAX_HISTORY} messages), "
+                  f"resumed msg updating")
+            self._set_paused(False)
 
-    def stop(self):
-        if not self.running:
+    def _register_fid(self, msg: Message):
+        """ A message from a FID that is not in the FID filter yet: the FID is added to the filter, checked,
+        so its messages are shown (e.g. after "Overwrite FID", a scenario or an external Function)"""
+        fid = str(msg.header.function_id)
+        if fid not in self._fid_filter.options:
+            self._fid_filter.add_option(fid, checked=True, sort_key=int)
+            self._fid_filter_selection.append(fid)
+
+    def _passes_filter(self, msg: Message) -> bool:
+        """ True if the message matches both filters (Msg and FID)"""
+        return (type(msg.bodies[0]).__name__ in self._msg_name_filter_selection
+                and str(msg.header.function_id) in self._fid_filter_selection)
+
+    def _apply_filter(self, selection: list[str], is_msg_name_filter: bool):
+        attr = "_msg_name_filter_selection" if is_msg_name_filter else "_fid_filter_selection"
+        setattr(self, attr, selection)
+        self._rebuild_rows()
+
+    def _rebuild_rows(self):
+        """ Fills the list again with the messages that pass the filters (after loading or filtering)"""
+        self._shown = [msg for msg in self._history if self._passes_filter(msg)]
+        self._tree.delete(*self._tree.get_children())
+        names = self._fid_names()
+        for msg in self._shown:
+            self._insert_row(msg, names)
+        if self._paused and not any(m is self._detail_msg for m in self._shown):
+            self._set_paused(False)  # the paused message is hidden now: follow the newest one
+        self._refresh()
+
+    def _delete_msgs(self):
+        if not self._shown:
+            print("[INFO] Nothing to delete")
             return
-        self._widget.after_cancel(self._after_id)
-        self._after_id = None
-        if self._on_finish:
-            self._on_finish(False)
+        to_delete = {id(m) for m in self._shown}  # by identity: one pass, no Message comparisons
+        self._history = [m for m in self._history if id(m) not in to_delete]
+        self._shown = []
+        self._tree.delete(*self._tree.get_children())
+        if self._paused:
+            self._set_paused(False)
+        self._refresh()
+        print("[INFO] Deleted messages")
 
-    def _run_step(self):
-        steps = self._sequence.steps
-        step = steps[self._index]
-        if step.button is not None:
-            self._press(step.button)
-        self._index += 1
-        if self._on_step:
-            self._on_step(self._index, len(steps), step)
-        if self._index >= len(steps):  # last step: its delay is not waited
-            self._after_id = None
-            if self._on_finish:
-                self._on_finish(True)
+    # ------------------------------------------------------------------------------------------------
+    # List
+    # ------------------------------------------------------------------------------------------------
+    def _insert_row(self, msg: Message, names: dict = None):
+        header = msg.header
+        fid = header.function_id
+        names = self._fid_names() if names is None else names
+        self._tree.insert("", "end", iid=str(id(msg)), values=(
+            _clock(_msg_time(msg)), fid, names.get(fid, "external"),
+            f"{type(msg.bodies[0]).__name__} ({extract_msg_id(header.msg_version_id)})",
+            header.msg_seq_number, header.number_of_it,
+        ))
+
+    def _on_user_select(self, event=None):
+        if event is not None and event.type == tk.EventType.ButtonRelease \
+                and self._tree.identify_region(event.x, event.y) != "cell":
+            return  # click on a heading or outside the rows
+        selected = self._tree.selection()
+        if not selected:
             return
-        self._next_time += step.delay_ms / 1000
-        wait_ms = max(0, round((self._next_time - time.perf_counter()) * 1000))
-        self._after_id = self._widget.after(wait_ms, self._run_step)
+        msg = next((m for m in self._shown if str(id(m)) == selected[0]), None)
+        if msg is None:
+            return
+        if not self._paused:  # the user picked a message: stop on it
+            self._set_paused(True)
+        self._draw_detail(msg)
+
+    def _select(self, msg: Message):
+        if msg is None:
+            self._tree.selection_set(())
+        else:
+            iid = str(id(msg))
+            self._tree.selection_set(iid)
+            self._tree.see(iid)
+
+    # ------------------------------------------------------------------------------------------------
+    # Pause and refresh
+    # ------------------------------------------------------------------------------------------------
+    def _toggle_pause(self):
+        self._set_paused(not self._paused)
+        print(f"[INFO] {self._displayer_name}: {'paused' if self._paused else 'resumed msg updating'}")
+
+    def _set_paused(self, paused: bool):
+        self._paused = paused
+        if paused:
+            self._button_pause.state(["pressed", "!active"])
+        else:
+            # hover color only if the mouse is on it (not when released automatically)
+            button = self._button_pause
+            pointer_over = button.winfo_containing(*button.winfo_pointerxy()) is button
+            button.state(["!pressed", "active" if pointer_over else "!active"])
+            self._refresh()
+
+    def _request_refresh(self):
+        if self._refresh_pending:
+            return
+        self._refresh_pending = True
+        self.after(_REFRESH_MS, self._refresh)
+
+    def _refresh(self):
+        self._refresh_pending = False
+        if not self.winfo_exists():
+            return
+        total = len(self._shown)
+        self._counter.config(text=f"{total} msgs")
+        if self._paused:
+            return  # the selected message stays
+        newest = self._shown[-1] if self._shown else None
+        self._select(newest)
+        self._draw_detail(newest)
+
+    # ------------------------------------------------------------------------------------------------
+    # Detail
+    # ------------------------------------------------------------------------------------------------
+    def _draw_detail(self, msg: Message):
+        if msg is self._detail_msg and msg is not None:
+            return  # same message: nothing to redraw
+        self._detail_msg = msg
+        text = self._detail
+        text.config(state="normal")
+        text.delete("1.0", tk.END)
+        if msg is None:
+            text.insert(tk.END, "No messages", "title")
+        else:
+            self._write_detail(msg)
+        text.config(state="disabled")
+
+    def _write_detail(self, msg: Message):
+        text = self._detail
+        header = msg.header
+        fid = header.function_id
+        name = self._fid_names().get(fid, "external")
+        msg_id = extract_msg_id(header.msg_version_id)
+        text.insert(tk.END, f"{type(msg.bodies[0]).__name__} ({msg_id})  ·  FID {fid} ({name})  ·  "
+                            f"seq {header.msg_seq_number}\n", "title")
+
+        text.insert(tk.END, "Header\n", "section")
+        ts = header.ts_seconds + header.ts_fractional / 2 ** 32
+        self._field("timestamp", _datetime(ts))
+        self._field("msg id / version", f"{msg_id} / {(header.msg_version_id >> 13) & 0x3}")
+        self._field("iterations", f"{header.number_of_it} x {header.single_it_len} B")
+
+        for i, body in enumerate(msg.bodies, start=1):
+            text.insert(tk.END, f"Iteration {i}\n", "section")
+            for field_name, field_type in body._fields_:
+                value, raw = _translate(field_name, field_type, getattr(body, field_name))
+                self._field(field_name, value, raw)
+
+    def _field(self, name: str, value, raw=None):
+        text = self._detail
+        text.insert(tk.END, f"    {name} = ", "name")
+        text.insert(tk.END, f"{value}")
+        if raw is not None:
+            text.insert(tk.END, f"  ({raw})", "raw")
+        text.insert(tk.END, "\n")
 
 
+# ------------------------------------------------------------------------------------------------
+# Values
+# ------------------------------------------------------------------------------------------------
+def _translate(field_name: str, field_type, value) -> tuple[str, str | None]:
+    """ (value to show, raw value or None). IPs and status are shown translated, arrays shortened"""
+    if hasattr(field_type, "_length_"):
+        values = list(value)
+        shown = ", ".join(str(v) for v in values[:8])
+        return (f"[{shown}{', ...' if len(values) > 8 else ''}]", f"{len(values)} values" if len(values) > 8 else None)
+    value = int(value)
+    name = field_name.lower()
+    if field_type is c_uint32 and (name in ("addr", "ip") or name.endswith(("_addr", "_ip"))):
+        return uint32_to_ip(value), str(value)
+    if name == "status" and value in _STATUS_NAMES:
+        return _STATUS_NAMES[value], str(value)
+    return str(value), None
 
 
-{
-    "_help": [
-        "3ATI sequence template for the NDAS Simulator: 'Load sequence' in the 3ATI Display Buttons window loads it and 'Run' plays it.",
-        "Keys starting with '_' are comments and are ignored.",
-        "Buttons (0-9) as placed around the display: 0-3 right side (top to bottom), 4 and 5 bottom (right to left), 6-9 left side (bottom to top).",
-        "default_delay_ms: time between one press and the next when a step has no delay_ms (default 1000).",
-        "repeat: how many times the whole list of steps is played (default 1).",
-        "steps, in order:",
-        "  {\"button\": n}: press button n, then wait default_delay_ms.",
-        "  {\"button\": n, \"delay_ms\": t}: press button n, then wait t milliseconds before the next step.",
-        "  {\"button\": n, \"times\": k}: press button n k times in a row, waiting delay_ms between presses.",
-        "  {\"wait_ms\": t}: extra pause of t milliseconds, without pressing anything.",
-        "The delay after the very last step is not waited: the sequence ends with its last press."
-    ],
-    "name": "Example 3ATI sequence",
-    "description": "Goes through some display pages and comes back",
-    "default_delay_ms": 1000,
-    "repeat": 1,
-    "steps": [
-        {"button": 9},
-        {"button": 0, "delay_ms": 500},
-        {"button": 3, "times": 3, "delay_ms": 300},
-        {"wait_ms": 2000},
-        {"button": 6, "_note": "back to the first page"}
-    ]
-}
+def _msg_time(msg: Message) -> float:
+    """ When the message was received/sent (event_time, set by the Function); if missing, its header timestamp"""
+    event_time = getattr(msg, "event_time", None)
+    if event_time is not None:
+        return event_time
+    return msg.header.ts_seconds + msg.header.ts_fractional / 2 ** 32
+
+
+def _clock(t: float) -> str:
+    return time.strftime("%H:%M:%S", time.localtime(t)) + f".{int((t % 1) * 1000):03d}"
+
+
+def _datetime(t: float) -> str:
+    return time.strftime("%Y-%m-%d ", time.localtime(t)) + _clock(t)
